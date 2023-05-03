@@ -1,0 +1,21 @@
+version: "3.3"
+
+services:
+  crawler:
+    build:
+      context: ./
+      dockerfile: ./Dockerfile
+    tty: true
+    user: 1234:1234
+    ipc: host
+    read_only: true
+    working_dir: /home/crawler
+    container_name: sample-crawler-using-playwright
+    hostname: sample-crawler-using-playwright
+    volumes:
+      - ./volumes/cache:/home/crawler/.cache
+      - ./volumes/mozilla:/home/crawler/.mozilla
+      - ./volumes/config:/home/crawler/.config
+      - ./volumes/tmp:/tmp
+    environment:
+      TZ: Asia/Tokyo

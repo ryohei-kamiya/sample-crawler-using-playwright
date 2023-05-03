@@ -42,7 +42,7 @@ def output(data: Any, filepath: str):
 
 async def crawl_pages(
     browser_type: BrowserType,
-    urls: set[str],
+    urls: set,
     output_root_dir: str,
     target_domains: set = set(),
     processed_urls: set = set(),
@@ -172,6 +172,9 @@ async def main(args):
                 browser_type = p.firefox
             elif browser_type_str == "webkit":
                 browser_type = p.webkit
+
+            makedir("/".join([args.output_root_dir, browser_type_str]))
+
             await crawl_pages(
                 browser_type,
                 urls,
@@ -184,23 +187,23 @@ async def main(args):
                 limit=args.limit,
             )
 
-        # 処理済みURLのリストを出力
-        output_filepath = "/".join(
-            [args.output_root_dir, browser_type_str, "all_processed_urls.txt"]
-        )
-        output(processed_urls, output_filepath)
+            # 処理済みURLのリストを出力
+            output_filepath = "/".join(
+                [args.output_root_dir, browser_type_str, "all_processed_urls.txt"]
+            )
+            output(processed_urls, output_filepath)
 
-        # 処理対象外URLのリストを出力
-        output_filepath = "/".join(
-            [args.output_root_dir, browser_type_str, "all_excluded_urls.txt"]
-        )
-        output(excluded_urls, output_filepath)
+            # 処理対象外URLのリストを出力
+            output_filepath = "/".join(
+                [args.output_root_dir, browser_type_str, "all_excluded_urls.txt"]
+            )
+            output(excluded_urls, output_filepath)
 
-        # リダイレクトURLのリストを出力
-        output_filepath = "/".join(
-            [args.output_root_dir, browser_type_str, "all_redirected_urls.txt"]
-        )
-        output(redirected_urls, output_filepath)
+            # リダイレクトURLのリストを出力
+            output_filepath = "/".join(
+                [args.output_root_dir, browser_type_str, "all_redirected_urls.txt"]
+            )
+            output(redirected_urls, output_filepath)
 
 
 if __name__ == "__main__":
@@ -216,7 +219,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output-root-dir",
         type=str,
-        default="output",
+        default="/tmp/crawler-output",
         help="Set output root directory",
     )
     parser.add_argument(
