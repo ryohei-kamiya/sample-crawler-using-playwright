@@ -25,7 +25,7 @@ def output(data: Any, filepath: str):
     with open(filepath, "w") as fout:
         if type(data) == str:
             fout.write(data)
-        elif type(data) == list:
+        elif type(data) == list or type(data) == set:
             for line in data:
                 line = line.strip()
                 if not line:  # 空文字は出力しない
@@ -162,10 +162,10 @@ async def main(args):
             urls.add(url)
             target_domains.add(target_domain)
 
-    processed_urls = set()
-    excluded_urls = set()
-    redirected_urls = {}
     for browser_type_str in args.browsers:
+        processed_urls = set()
+        excluded_urls = set()
+        redirected_urls = {}
         async with async_playwright() as p:
             browser_type = p.chromium
             if browser_type_str == "firefox":
