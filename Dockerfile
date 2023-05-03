@@ -13,11 +13,9 @@ ARG UID=1234
 RUN useradd -u ${UID} -m ${USER}
 
 COPY ./crawler/requirements.txt /home/${USER}/requirements.txt
-RUN apt-get -y install python3-pip python3-venv && \
-  python3 -m venv /home/${USER}/.venv && \
-  . /home/${USER}/.venv/bin/activate && \
-  pip install --upgrade pip && \
-  pip install -r /home/${USER}/requirements.txt
+RUN apt-get -y install python3-pip python3-venv python3-seccomp libseccomp-dev strace && \
+  pip3 install --upgrade pip && \
+  pip3 install -r /home/${USER}/requirements.txt
 
 COPY ./crawler /home/${USER}
 RUN chown -R ${USER}:${USER} /home/${USER}
