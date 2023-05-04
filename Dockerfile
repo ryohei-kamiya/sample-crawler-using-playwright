@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/playwright/python:jammy
+FROM mcr.microsoft.com/playwright/python:v1.33.0-jammy
 RUN apt-get update && apt-get -y upgrade && apt-get -y install language-pack-ja
 
 ENV TZ=Asia/Tokyo

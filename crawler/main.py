@@ -66,6 +66,10 @@ def crawl_page(browser_type_str: str, url: str):
         status = response.status
         if 300 <= status <= 399:
             redirected_urls[response.url] = response.headers["location"]
+            print(
+                f"[Redirect] {response.url} => {response.headers['location']}",
+                file=sys.stderr,
+            )
 
     with sync_playwright() as p:
         browser_type = p.chromium
@@ -219,6 +223,20 @@ def crawl_page_in_sandbox(browser_type_str: str, url: str) -> tuple[str, list, d
         "write",
         "writev",
     ]
+
+    # firefoxは以下のシステムコールを要求する(dmesgで確認した)。
+    # これらがなぜブラウザの動作に必要なのか理由が分からない。
+    # firefoxは使用すべきではないかも知れない。
+    # 使用した環境(Dockerイメージ)は playwright/python:v1.33.0-jammy。
+    # バージョンを変えると挙動が変わる可能性あり。その際は要再評価。
+    """ firefoxが追加で要求するシステムコールの一覧
+        "acct": プロセスアカウンティングを有効化/無効化
+        "umount2": ファイルシステムのアンマウント
+        "_sysctl": カーネルパラメータを取得/設定
+        "symlink": シンボリックリンクを作成
+        "sendfile": 二つのファイルディスクリプタ間でデータを送信
+        "readlink": シンボリックリンクの内容を読み取り
+    """
 
     for syscall_name in allowed_syscalls:
         filter.add_rule(seccomp.ALLOW, syscall_name)
