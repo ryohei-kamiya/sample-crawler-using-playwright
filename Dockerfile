@@ -7,7 +7,6 @@ ENV PYTHONIOENCODING=utf-8
 ENV LC_ALL='ja_JP.UTF-8'
 ENV LANG='ja_JP.UTF-8'
 ENV USER crawler
-ENV PYENV_ROOT /home/${USER}/.pyenv
 
 ARG UID=1234
 RUN useradd -u ${UID} -m ${USER}
