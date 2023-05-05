@@ -7,21 +7,57 @@ import signal
 import sys
 import seccomp
 import inspect
+import asyncio
+import uuid
+import idna
+import hashlib
 from typing import Any
-from urllib.parse import urlparse
-from playwright.sync_api import sync_playwright
+from urllib.parse import urlparse, quote
+from playwright.async_api import async_playwright
 from multiprocessing import Pool, TimeoutError
 
 
 def url2dirpath(url: str) -> str:
-    result = re.sub(r"^.*://", "", url)
+    parsed_url = urlparse(url)
+    hostname = (
+        idna.encode(parsed_url.hostname).decode("utf-8") if parsed_url.hostname else ""
+    )
+    path = parsed_url.path if parsed_url.path else ""
+    path = path.strip("/")
+    query = quote(parsed_url.query) if parsed_url.query else ""
+    fragment = quote(parsed_url.fragment) if parsed_url.fragment else ""
+    h = hashlib.new("sha256")
+    if len(path) > 512:
+        parts = []
+        for part in path.split("/"):
+            if len(part) > 255:
+                h.update(bytes(part, "utf-8"))
+                part = h.hexdigest()
+            parts.append(part)
+        path = "/".join(parts)
+        if len(path) > 512:
+            path = path[:512]
+    if len(query) > 255:
+        h.update(bytes(query, "utf-8"))
+        query = h.hexdigest()
+    if len(fragment) > 255:
+        h = hashlib.new("sha256")
+        h.update(bytes(fragment, "utf-8"))
+        fragment = h.hexdigest()
+    result = "/".join([hostname, path, query, fragment])
     result = re.sub(r"[^\-0-9a-zA-Z\./]", "_", result)
-    result = result.strip("/ ")
+    result = result.strip("/")
     return result
 
 
-def makedir(dirpath: str):
-    os.makedirs(dirpath, exist_ok=True)
+def makedir(dirpath: str) -> str:
+    try:
+        os.makedirs(dirpath, exist_ok=True)
+        return dirpath
+    except Exception:
+        uniqdirpath = "__" + str(uuid.uuid4())
+        os.makedirs(uniqdirpath, exist_ok=True)
+        return uniqdirpath
 
 
 def output(data: Any, filepath: str):
@@ -59,49 +95,101 @@ def sigsys_handler(signum, frame):
     sys.exit(1)
 
 
-def crawl_page(browser_type_str: str, url: str):
-    redirected_urls: dict = {}
-
-    def redirect_handler(response):
-        status = response.status
-        if 300 <= status <= 399:
-            redirected_urls[response.url] = response.headers["location"]
-            print(
-                f"[Redirect] {response.url} => {response.headers['location']}",
-                file=sys.stderr,
-            )
-
-    with sync_playwright() as p:
+async def crawl_page(
+    browser_type_str: str, url: str
+) -> tuple[str, set[str], dict[str, str], dict[str, str]]:
+    async with async_playwright() as p:
         browser_type = p.chromium
         if browser_type_str == "firefox":
             browser_type = p.firefox
         elif browser_type_str == "webkit":
             browser_type = p.webkit
-        browser = browser_type.launch(headless=True)  # デフォルトでsandboxが有効
-        page = browser.new_page()
-        page.on(
-            "response",
-            redirect_handler,
-        )
-        page.goto(url)  # ページ読み込みが完了するまで待機
+        browser = await browser_type.launch(headless=True)  # デフォルトでsandboxが有効
+        context = await browser.new_context()
+
+        redirected_urls: dict[str, str] = {}
+        js_files: dict[str, str] = {}
+
+        def response_handler(response):
+            # リダイレクトを検出
+            if 300 <= response.status < 400 and response.headers.get("location"):
+                redirected_urls[response.url] = response.headers["location"]
+            # JavaScriptファイルの内容を取得
+            if response.request.resource_type == "script":
+                if response.ok and js_files.get(response.url, None) is None:
+                    asyncio.create_task(get_js_content(response))
+
+        async def get_js_content(response):
+            if not js_files.get(response.url):
+                content = await response.text()
+                js_files[response.url] = content
+
+        context.on("response", response_handler)  # 全てのコンテンツのresponseイベントを捕捉
+
+        page = await context.new_page()
+
+        await page.goto(url)  # ページ読み込みが完了するまで待機
+        print(f"[GET]{url}")
 
         # ページ内のコンテンツを取得
-        content = page.content()
+        content: str = await page.content()
 
-        # ページ内のリンクリストを取得
-        sub_links = page.evaluate(
-            """() => {
-            return Array.from(document.querySelectorAll('a'))
-                .map(link => link.href);
-        }"""
+        sub_links: set[str] = set()
+
+        # ページ遷移とメディアデータ取得をキャンセルするイベントリスナーを設定
+        async def cancel_requests(route):
+            request = route.request
+            if request.resource_type == "document":
+                sub_links.add(request.url)  # ページ内のリンクリストを収集
+                await route.abort()  # ページ遷移をキャンセル
+            elif request.resource_type == "image":
+                await route.abort()  # イメージデータ取得をキャンセル
+            elif request.resource_type == "media":
+                await route.abort()  # メディアデータ取得をキャンセル
+            else:
+                await route.continue_()  # その他のリクエストは継続
+
+        await page.route("**", cancel_requests)  # ページ遷移とメディアデータ取得をキャンセル
+
+        # JavaScriptファイルの動的検知のため、以下の操作をページ上で実行
+        # 処理1. スムーズスクロール
+        # 処理2. 数秒待機
+        # 処理3. リンクを動的に検出してクリック
+
+        # 処理1. スムーズスクロール
+        await page.evaluate(
+            "window.scrollTo({top: document.body.scrollHeight, left: 0, behavior: 'smooth'})"
         )
 
-        page.close()
-        browser.close()
-        return content, sub_links, redirected_urls
+        # 処理2. 数秒(3秒)待機
+        await asyncio.sleep(3)
+
+        # 処理3. リンクを動的に検出してクリック
+        linkelems = await page.query_selector_all("a")
+        for linkelem in linkelems:
+            if (
+                await linkelem.is_visible()
+                and await linkelem.is_enabled()
+                and await linkelem.evaluate("el => document.body.contains(el)")
+            ):
+                sub_url = await linkelem.get_attribute("href")
+                if sub_url and type(sub_url) is str:
+                    try:
+                        await linkelem.click(timeout=5000)  # クリック後、最長5秒待機
+                    except asyncio.TimeoutError:
+                        # ページ遷移がキャンセルされた場合、タイムアウトエラーが発生するので無視
+                        pass
+
+        await page.close()
+        await context.close()
+        await browser.close()
+
+        return content, sub_links, redirected_urls, js_files
 
 
-def crawl_page_in_sandbox(browser_type_str: str, url: str) -> tuple[str, list, dict]:
+def crawl_page_in_sandbox(
+    browser_type_str: str, url: str
+) -> tuple[str, set[str], dict[str, str], dict[str, str]]:
     signal.signal(signal.SIGSYS, sigsys_handler)
 
     # seccomp のフィルターを作成
@@ -461,11 +549,10 @@ def crawl_page_in_sandbox(browser_type_str: str, url: str) -> tuple[str, list, d
     filter.load()
 
     try:
-        result = crawl_page(browser_type_str, url)
-        return result
+        return asyncio.run(crawl_page(browser_type_str, url))
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return f"Errro: {e} in {url}", [], {}
+        print(f"Error: {url} {e}", file=sys.stderr)
+        return f"Errro: {e} in {url}", set(), {}, {}
 
 
 def crawl_pages(
@@ -473,7 +560,7 @@ def crawl_pages(
     urls: set,
     output_root_dir: str,
     target_domains: set = set(),
-    processed_urls: set = set(),
+    processed_urls: dict = {},
     excluded_urls: set = set(),
     redirected_urls: dict = {},
     depth: int = -1,
@@ -487,40 +574,63 @@ def crawl_pages(
     randomized_urls = list(urls)
     random.shuffle(randomized_urls)
     with Pool(processes=limit) as pool:
+        procs = []
         for url in urls:
             if url in excluded_urls:
                 continue  # excluded_urls に含まれる URL はクロール対象から除外
-
+            procs.append(
+                (url, pool.apply_async(crawl_page_in_sandbox, (browser_type_str, url)))
+            )
+        for proc in procs:
             try:
-                res = pool.apply_async(crawl_page_in_sandbox, (browser_type_str, url))
+                url = proc[0]
+                res = proc[1]
                 results = res.get(timeout=timeout)
 
                 content = results[0]
-
-                for sub_link in results[1]:
+                sub_links = results[1]
+                for sub_link in sub_links:
                     sub_urls.add(sub_link)
 
                 for key, value in results[2].items():
                     redirected_urls[key] = value
 
+                js_files = results[3]
+
                 dirpath = url2dirpath(url)
-                makedir("/".join([output_root_dir, browser_type_str, dirpath]))
+                dirpath = makedir(
+                    "/".join([output_root_dir, browser_type_str, "page", dirpath])
+                )
 
                 # クローリングしたHTMLデータを出力
                 output(
                     content,
-                    "/".join(
-                        [output_root_dir, browser_type_str, dirpath, "content.html"]
-                    ),
+                    "/".join([dirpath, "content.html"]),
                 )
 
                 # ページ内のリンクリストを出力
                 output(
-                    sub_urls,
-                    "/".join([output_root_dir, browser_type_str, dirpath, "urls.txt"]),
+                    sub_links,
+                    "/".join([dirpath, "urls.txt"]),
                 )
 
-                processed_urls.add(url)  # クロール済みURLは、処理済みURLリストに追加
+                # ページ内のJavaScriptファイルを出力
+                for js_url, js_content in js_files.items():
+                    js_dirpath = url2dirpath(js_url)
+                    js_dirpath = makedir(
+                        "/".join([output_root_dir, browser_type_str, "js", js_dirpath])
+                    )
+                    output(  # JavaScriptのURLに対応するディレクトリに保存
+                        js_content,
+                        "/".join([js_dirpath, "script.js"]),
+                    )
+                    realfile = "/".join([js_dirpath, "script.js"])
+                    linkfile = "/".join([dirpath, str(uuid.uuid4()) + ".js"])
+                    os.symlink(realfile, linkfile)  # リンク元のページのディレクトリにシンボリックリンクを置く
+
+                processed_urls[
+                    url
+                ] = dirpath  # クロール済みURLは、保存先ディレクトリ名と関連付けて処理済みURLリストに追加
             except TimeoutError:
                 traceback.print_exc()
             except Exception:
@@ -528,7 +638,7 @@ def crawl_pages(
 
     # クロール済みリンク、外部リンクは、次のクロール対象(next_urls)から除去する
     next_urls = set()
-    links = (urls | sub_urls) - processed_urls - excluded_urls
+    links = (urls | sub_urls) - set(processed_urls.keys()) - excluded_urls
     for link in links:
         link_parsed_url = urlparse(link)
         link_domain = link_parsed_url.hostname
@@ -568,7 +678,7 @@ def main(args):
             target_domains.add(target_domain)
 
     for browser_type_str in args.browsers:
-        processed_urls = set()
+        processed_urls = {}
         excluded_urls = set()
         redirected_urls = {}
         makedir("/".join([args.output_root_dir, browser_type_str]))
