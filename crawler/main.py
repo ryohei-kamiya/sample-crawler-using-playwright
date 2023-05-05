@@ -73,22 +73,6 @@ def output(data: Any, filepath: str):
                 fout.write(f"{key} => {value}\n")
 
 
-def sigsys_handler(signum, frame):
-    # スタックフレーム情報を取得
-    frame_info = inspect.getframeinfo(frame)
-
-    # ファイル名、行番号、関数名を取得
-    filename = frame_info.filename
-    line_number = frame_info.lineno
-    function_name = frame_info.function
-
-    print(
-        f"{filename}:{line_number}:{function_name} Unauthorized system call ({signum}) invoked.",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
-
 async def crawl_page(
     browser_type_str: str, url: str
 ) -> tuple[str, set[str], dict[str, str], dict[str, str]]:
@@ -183,7 +167,33 @@ async def crawl_page(
 
 def crawl_page_in_sandbox(
     browser_type_str: str, url: str
-) -> tuple[str, set[str], dict[str, str], dict[str, str]]:
+) -> tuple[str, set[str], dict[str, str], dict[str, str], dict[str, str]]:
+    error_msg: dict[str, str] = {}
+
+    def sigsys_handler(signum, frame):
+        # スタックフレーム情報を取得
+        frame_info = inspect.getframeinfo(frame)
+
+        # ファイル名、行番号、関数名を取得
+        filename = frame_info.filename
+        line_number = frame_info.lineno
+        function_name = frame_info.function
+
+        extracted_frames = traceback.extract_stack(frame)
+        formatted_stack_trace = "".join(
+            [
+                line.replace("\n", "\\n")
+                for line in traceback.format_list(extracted_frames)
+            ]
+        )
+
+        print(
+            f"{filename}:{line_number}:{function_name} During the processing of the URL ({url}), an unauthorized system call has been invoked(signal number: {signum}). {formatted_stack_trace}",
+            file=sys.stderr,
+        )
+        error_msg[url] = f"[signal number: {signum}] {formatted_stack_trace}"
+        error_msg["signal"] = str(signum)
+
     signal.signal(signal.SIGSYS, sigsys_handler)
 
     # seccomp のフィルターを作成
@@ -543,10 +553,14 @@ def crawl_page_in_sandbox(
     filter.load()
 
     try:
-        return asyncio.run(crawl_page(browser_type_str, url))
+        # if random.random() < 0.5:  # シグナルの動作テストをするときにコメントを解除
+        #     os.kill(os.getpid(), signal.SIGSYS)
+        r = asyncio.run(crawl_page(browser_type_str, url))
+        return r[0], r[1], r[2], r[3], error_msg
     except Exception as e:
-        print(f"Error: {url} {e}", file=sys.stderr)
-        return f"Errro: {e} in {url}", set(), {}, {}
+        if not error_msg.get("signal"):
+            error_msg[url] = traceback.format_exc().replace("\n", "\\n")
+        return f"Error: {e} in {url}", set(), {}, {}, error_msg
 
 
 def crawl_pages(
@@ -557,6 +571,8 @@ def crawl_pages(
     processed_urls: dict = {},
     excluded_urls: set = set(),
     redirected_urls: dict = {},
+    error_urls: dict = {},
+    suspicious_urls: dict = {},
     depth: int = -1,
     limit: int = 5,  # 同時にクロールするURLは5つまで
     timeout: int = 30,  # タイムアウト時間の初期値は30秒
@@ -590,6 +606,7 @@ def crawl_pages(
                     redirected_urls[key] = value
 
                 js_files = results[3]
+                error_msg: dict[str, str] = results[4]
 
                 dirpath = url2dirpath(url)
                 try:
@@ -645,6 +662,11 @@ def crawl_pages(
                 processed_urls[
                     url
                 ] = dirpath  # クロール済みURLは、保存先ディレクトリ名と関連付けて処理済みURLリストに追加
+                if error_msg:
+                    error_urls[url] = content.replace("\n", "\\n")
+                    if error_msg.get("signal"):
+                        print(error_msg.get(url))
+                        suspicious_urls[url] = error_msg.get(url)
             except TimeoutError:
                 traceback.print_exc()
             except Exception:
@@ -670,8 +692,11 @@ def crawl_pages(
             processed_urls,
             excluded_urls,
             redirected_urls,
+            error_urls,
+            suspicious_urls,
             depth - 1,
             limit,
+            timeout,
         )
 
 
@@ -695,6 +720,8 @@ def main(args):
         processed_urls = {}
         excluded_urls = set()
         redirected_urls = {}
+        error_urls: dict = {}
+        suspicious_urls: dict = {}
         makedir("/".join([args.output_root_dir, browser_type_str]))
 
         crawl_pages(
@@ -705,8 +732,11 @@ def main(args):
             processed_urls,
             excluded_urls,
             redirected_urls,
+            error_urls,
+            suspicious_urls,
             depth=args.depth,
             limit=args.limit,
+            timeout=30,
         )
 
         # 処理済みURLのリストを出力
@@ -726,6 +756,18 @@ def main(args):
             [args.output_root_dir, browser_type_str, "all_redirected_urls.txt"]
         )
         output(redirected_urls, output_filepath)
+
+        # エラー発生URLのリストを出力
+        output_filepath = "/".join(
+            [args.output_root_dir, browser_type_str, "all_error_urls.txt"]
+        )
+        output(error_urls, output_filepath)
+
+        # 不許可のシステムコールを呼び出すなど不審な処理を実行するコンテンツを含むURLのリストを出力
+        output_filepath = "/".join(
+            [args.output_root_dir, browser_type_str, "all_suspicious_urls.txt"]
+        )
+        output(suspicious_urls, output_filepath)
 
 
 if __name__ == "__main__":
