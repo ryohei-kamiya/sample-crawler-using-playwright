@@ -50,14 +50,8 @@ def url2dirpath(url: str) -> str:
     return result
 
 
-def makedir(dirpath: str) -> str:
-    try:
-        os.makedirs(dirpath, exist_ok=True)
-        return dirpath
-    except Exception:
-        uniqdirpath = "__" + str(uuid.uuid4())
-        os.makedirs(uniqdirpath, exist_ok=True)
-        return uniqdirpath
+def makedir(dirpath: str):
+    os.makedirs(dirpath, exist_ok=True)
 
 
 def output(data: Any, filepath: str):
@@ -598,9 +592,16 @@ def crawl_pages(
                 js_files = results[3]
 
                 dirpath = url2dirpath(url)
-                dirpath = makedir(
-                    "/".join([output_root_dir, browser_type_str, "page", dirpath])
-                )
+                try:
+                    makedir(
+                        "/".join([output_root_dir, browser_type_str, "page", dirpath])
+                    )
+                except Exception:
+                    dirpath = "__" + str(uuid.uuid4())
+                    makedir(
+                        "/".join([output_root_dir, browser_type_str, "page", dirpath])
+                    )
+                dirpath = "/".join([output_root_dir, browser_type_str, "page", dirpath])
 
                 # クローリングしたHTMLデータを出力
                 output(
@@ -617,8 +618,21 @@ def crawl_pages(
                 # ページ内のJavaScriptファイルを出力
                 for js_url, js_content in js_files.items():
                     js_dirpath = url2dirpath(js_url)
-                    js_dirpath = makedir(
-                        "/".join([output_root_dir, browser_type_str, "js", js_dirpath])
+                    try:
+                        makedir(
+                            "/".join(
+                                [output_root_dir, browser_type_str, "js", js_dirpath]
+                            )
+                        )
+                    except Exception:
+                        js_dirpath = "__" + str(uuid.uuid4())
+                        makedir(
+                            "/".join(
+                                [output_root_dir, browser_type_str, "js", js_dirpath]
+                            )
+                        )
+                    js_dirpath = "/".join(
+                        [output_root_dir, browser_type_str, "js", js_dirpath]
                     )
                     output(  # JavaScriptのURLに対応するディレクトリに保存
                         js_content,
